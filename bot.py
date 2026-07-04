@@ -56,6 +56,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ---------- OWNER ID ----------
+OWNER_ID = int(os.getenv("OWNER_ID", "0")) if os.getenv("OWNER_ID") else None
+
 # ---------- HELPER FUNCTIONS ----------
 def generate_key_code(length=8):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
@@ -139,6 +142,19 @@ def get_user_stats(discord_id):
     conn.close()
     return row[0] if row else 0
 
+def is_admin_or_owner(interaction: discord.Interaction) -> bool:
+    """Check if user is admin, owner, or bot owner"""
+    # Check if server owner
+    if interaction.user.id == interaction.guild.owner_id:
+        return True
+    # Check if administrator
+    if interaction.user.guild_permissions.administrator:
+        return True
+    # Check if bot owner
+    if OWNER_ID and interaction.user.id == OWNER_ID:
+        return True
+    return False
+
 # ---------- MODAL ----------
 class RedeemModal(discord.ui.Modal, title="Redeem Key"):
     key_input = discord.ui.TextInput(label="Enter your key code", placeholder="e.g. ABC123", required=True)
@@ -199,19 +215,26 @@ class PanelView(discord.ui.View):
 @bot.tree.command(name="panel", description="Send the key redemption panel to a channel")
 @app_commands.describe(channel="The channel to send the panel (optional)")
 async def panel(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("You don't have permission.", ephemeral=True)
+    # Check permissions - Server Owner, Admin, or Bot Owner
+    if not is_admin_or_owner(interaction):
+        embed = discord.Embed(
+            title="❌ Permission Denied",
+            description="You need to be a Server Owner, Administrator, or Bot Owner to use this command.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
+    
     target = channel or interaction.channel
     embed = discord.Embed(title="🔑 Key Redemption Panel", description="Use the buttons below.", color=discord.Color.gold())
     view = PanelView()
     await target.send(embed=embed, view=view)
-    await interaction.response.send_message(f"Panel sent to {target.mention}", ephemeral=True)
+    await interaction.response.send_message(f"✅ Panel sent to {target.mention}", ephemeral=True)
 
 @bot.tree.command(name="genkey", description="Generate a new key (admin only)")
 @app_commands.describe(
-    key_code="Optional custom key; auto-generate if blank",
     github_url="Raw GitHub URL of the Lua script (e.g., https://raw.githubusercontent.com/.../script.lua)",
+    key_code="Optional custom key; auto-generate if blank",
     max_uses="Max redemptions (default 1)",
     expiry_days="Days until expiry (0 = no expiry, default 0)"
 )
@@ -222,22 +245,30 @@ async def genkey(
     max_uses: int = 1,
     expiry_days: int = 0
 ):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("No permission.", ephemeral=True)
+    # Check permissions - Server Owner, Admin, or Bot Owner
+    if not is_admin_or_owner(interaction):
+        embed = discord.Embed(
+            title="❌ Permission Denied",
+            description="You need to be a Server Owner, Administrator, or Bot Owner to use this command.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
         return
+    
     if not key_code:
         key_code = generate_key_code()
+    
     success = add_key(key_code, github_url, max_uses, expiry_days)
     if success:
         expiry_text = f"{expiry_days} days" if expiry_days > 0 else "No expiry"
         embed = discord.Embed(title="✅ Key Generated", color=discord.Color.green())
-        embed.add_field(name="Key Code", value=key_code, inline=False)
+        embed.add_field(name="Key Code", value=f"`{key_code}`", inline=False)
         embed.add_field(name="GitHub URL", value=github_url, inline=False)
         embed.add_field(name="Max Uses", value=str(max_uses), inline=True)
         embed.add_field(name="Expiry", value=expiry_text, inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
-        await interaction.response.send_message(f"Key `{key_code}` already exists.", ephemeral=True)
+        await interaction.response.send_message(f"❌ Key `{key_code}` already exists.", ephemeral=True)
 
 # ---------- VALIDATION WEB SERVER ----------
 async def validate(request):
