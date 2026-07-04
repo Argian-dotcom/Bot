@@ -56,9 +56,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------- OWNER ID ----------
-OWNER_ID = int(os.getenv("OWNER_ID", "0")) if os.getenv("OWNER_ID") else None
-
 # ---------- HELPER FUNCTIONS ----------
 def generate_key_code(length=8):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
@@ -142,91 +139,150 @@ def get_user_stats(discord_id):
     conn.close()
     return row[0] if row else 0
 
-def is_admin_or_owner(interaction: discord.Interaction) -> bool:
-    """Check if user is admin, owner, or bot owner"""
-    # Check if server owner
-    if interaction.user.id == interaction.guild.owner_id:
-        return True
-    # Check if administrator
-    if interaction.user.guild_permissions.administrator:
-        return True
-    # Check if bot owner
-    if OWNER_ID and interaction.user.id == OWNER_ID:
-        return True
-    return False
-
 # ---------- MODAL ----------
 class RedeemModal(discord.ui.Modal, title="Redeem Key"):
-    key_input = discord.ui.TextInput(label="Enter your key code", placeholder="e.g. ABC123", required=True)
+    key_input = discord.ui.TextInput(
+        label="Enter your key code",
+        placeholder="e.g. ABC123XY",
+        required=True,
+        max_length=20
+    )
+    
     async def on_submit(self, interaction: discord.Interaction):
-        key_code = self.key_input.value.strip()
+        await interaction.response.defer(ephemeral=True)
+        
+        key_code = self.key_input.value.strip().upper()
         user_id = str(interaction.user.id)
-        script_url, used_key, msg = redeem_key(key_code, user_id)
-        if script_url is None:
-            embed = discord.Embed(title="❌ Failed", description=msg, color=discord.Color.red())
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
-        loader = f'getgenv().Key = "{used_key}"\nloadstring(game:HttpGet("{script_url}"))()'
-        embed = discord.Embed(title="✅ Key Redeemed!", description=msg, color=discord.Color.green())
-        embed.add_field(name="Your Loader", value=f"```lua\n{loader}\n```", inline=False)
-        embed.set_footer(text="I-copy ang loader at i-paste sa executor.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        try:
+            script_url, used_key, msg = redeem_key(key_code, user_id)
+            
+            if script_url is None:
+                embed = discord.Embed(
+                    title="❌ Redemption Failed",
+                    description=msg,
+                    color=discord.Color.red()
+                )
+                embed.set_footer(text="Please check your key and try again.")
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+            
+            # Success - show loader
+            loader = f'getgenv().Key = "{used_key}"\nloadstring(game:HttpGet("{script_url}"))()'
+            
+            embed = discord.Embed(
+                title="✅ Key Redeemed Successfully!",
+                description=msg,
+                color=discord.Color.green()
+            )
+            embed.add_field(
+                name="🔑 Your Loader",
+                value=f"```lua\n{loader}\n```",
+                inline=False
+            )
+            embed.set_footer(text="Copy the loader and paste it in your executor.")
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            embed = discord.Embed(
+                title="❌ Error",
+                description=f"An error occurred: {str(e)}",
+                color=discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ---------- PANEL VIEW ----------
 class PanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Redeem Key", style=discord.ButtonStyle.primary, custom_id="redeem")
+    @discord.ui.button(label="🔑 Redeem Key", style=discord.ButtonStyle.primary, custom_id="redeem")
     async def redeem_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RedeemModal(interaction))
+        await interaction.response.send_modal(RedeemModal())
 
-    @discord.ui.button(label="View Script", style=discord.ButtonStyle.success, custom_id="view_script")
+    @discord.ui.button(label="📜 View Loaders", style=discord.ButtonStyle.success, custom_id="view_script")
     async def view_script_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        
         user_id = str(interaction.user.id)
         redemptions = get_user_redemptions(user_id)
+        
         if not redemptions:
-            embed = discord.Embed(title="No Scripts", description="Wala ka pang na-redeem na keys.", color=discord.Color.orange())
-        else:
-            desc = ""
-            for key_code, redeemed_at in redemptions:
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("SELECT script_url FROM keys WHERE key_code = ?", (key_code,))
-                row = c.fetchone()
-                conn.close()
-                if row:
-                    script_url = row[0]
-                    loader = f'getgenv().Key = "{key_code}"\nloadstring(game:HttpGet("{script_url}"))()'
-                    desc += f"**Key:** {key_code}\n```lua\n{loader}\n```\n\n"
-            embed = discord.Embed(title="📜 Your Loaders", description=desc, color=discord.Color.blue())
-            embed.set_footer(text="I-copy ang loader at i-paste sa executor.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+            embed = discord.Embed(
+                title="📭 No Loaders Yet",
+                description="You haven't redeemed any keys yet.\n\nClick the **🔑 Redeem Key** button to get started!",
+                color=discord.Color.orange()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+        
+        desc = ""
+        for key_code, redeemed_at in redemptions:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT script_url FROM keys WHERE key_code = ?", (key_code,))
+            row = c.fetchone()
+            conn.close()
+            
+            if row:
+                script_url = row[0]
+                loader = f'getgenv().Key = "{key_code}"\nloadstring(game:HttpGet("{script_url}"))()'
+                
+                # Format date nicely
+                try:
+                    redeemed_date = datetime.fromisoformat(redeemed_at).strftime("%Y-%m-%d %H:%M:%S")
+                except:
+                    redeemed_date = redeemed_at
+                
+                desc += f"**Redeemed:** {redeemed_date}\n```lua\n{loader}\n```\n\n"
+        
+        embed = discord.Embed(
+            title="📜 Your Loaders",
+            description=desc if desc else "No loaders available.",
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="Copy the loader and paste it in your executor.")
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="View Stats", style=discord.ButtonStyle.secondary, custom_id="view_stats")
+    @discord.ui.button(label="📊 My Stats", style=discord.ButtonStyle.secondary, custom_id="view_stats")
     async def stats_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        
         user_id = str(interaction.user.id)
         total = get_user_stats(user_id)
-        embed = discord.Embed(title="Your Stats", color=discord.Color.purple())
-        embed.add_field(name="Keys Redeemed", value=total, inline=False)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        embed = discord.Embed(
+            title="📊 Your Statistics",
+            color=discord.Color.purple()
+        )
+        embed.add_field(
+            name="🎉 Total Keys Redeemed",
+            value=str(total),
+            inline=False
+        )
+        embed.set_footer(text="Keep collecting those keys!")
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ---------- SLASH COMMANDS ----------
 @bot.tree.command(name="panel", description="Send the key redemption panel to a channel")
 @app_commands.describe(channel="The channel to send the panel (optional)")
 async def panel(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    # Check permissions - Server Owner, Admin, or Bot Owner
-    if not is_admin_or_owner(interaction):
-        embed = discord.Embed(
-            title="❌ Permission Denied",
-            description="You need to be a Server Owner, Administrator, or Bot Owner to use this command.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         return
     
     target = channel or interaction.channel
-    embed = discord.Embed(title="🔑 Key Redemption Panel", description="Use the buttons below.", color=discord.Color.gold())
+    embed = discord.Embed(
+        title="🔑 Key Redemption Panel",
+        description="Use the buttons below to manage your keys!",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="🔑 Redeem Key", value="Enter your key code to get the loader", inline=False)
+    embed.add_field(name="📜 View Loaders", value="See all your redeemed loaders (without key details)", inline=False)
+    embed.add_field(name="📊 My Stats", value="Check your redemption statistics (only redemption count)", inline=False)
+    
     view = PanelView()
     await target.send(embed=embed, view=view)
     await interaction.response.send_message(f"✅ Panel sent to {target.mention}", ephemeral=True)
@@ -245,27 +301,23 @@ async def genkey(
     max_uses: int = 1,
     expiry_days: int = 0
 ):
-    # Check permissions - Server Owner, Admin, or Bot Owner
-    if not is_admin_or_owner(interaction):
-        embed = discord.Embed(
-            title="❌ Permission Denied",
-            description="You need to be a Server Owner, Administrator, or Bot Owner to use this command.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
         return
     
     if not key_code:
         key_code = generate_key_code()
     
+    key_code = key_code.upper()
     success = add_key(key_code, github_url, max_uses, expiry_days)
+    
     if success:
         expiry_text = f"{expiry_days} days" if expiry_days > 0 else "No expiry"
         embed = discord.Embed(title="✅ Key Generated", color=discord.Color.green())
-        embed.add_field(name="Key Code", value=f"`{key_code}`", inline=False)
-        embed.add_field(name="GitHub URL", value=github_url, inline=False)
-        embed.add_field(name="Max Uses", value=str(max_uses), inline=True)
-        embed.add_field(name="Expiry", value=expiry_text, inline=True)
+        embed.add_field(name="🔑 Key Code", value=f"`{key_code}`", inline=False)
+        embed.add_field(name="📁 GitHub URL", value=github_url, inline=False)
+        embed.add_field(name="📈 Max Uses", value=str(max_uses), inline=True)
+        embed.add_field(name="⏰ Expiry", value=expiry_text, inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
         await interaction.response.send_message(f"❌ Key `{key_code}` already exists.", ephemeral=True)
@@ -277,17 +329,27 @@ async def validate(request):
         key = data.get('key')
     except:
         return web.json_response({"valid": False, "message": "Invalid JSON"}, status=400)
+    
     if not key:
         return web.json_response({"valid": False, "message": "No key provided"}, status=400)
+    
     valid = is_key_valid(key)
+    
     if valid:
-        return web.json_response({"valid": True})
+        return web.json_response({"valid": True, "message": "Key is valid"}, status=200)
     else:
-        return web.json_response({"valid": False}, status=403)
+        return web.json_response({"valid": False, "message": "Key is invalid or expired"}, status=403)
+
+async def health_check(request):
+    """Health check endpoint for UptimeRobot - returns 200 OK"""
+    return web.json_response({"status": "ok", "bot": "online"}, status=200)
 
 async def start_web():
     app = web.Application()
     app.router.add_post('/validate', validate)
+    app.router.add_get('/', health_check)  # Health check endpoint for UptimeRobot
+    app.router.add_get('/health', health_check)  # Alternative health endpoint
+    
     runner = web.AppRunner(app)
     await runner.setup()
     
@@ -297,6 +359,7 @@ async def start_web():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"✅ Validation server running on port {port}")
+    print(f"✅ Health check available at / and /health")
     
     # Keep the server alive
     await asyncio.Event().wait()
@@ -305,14 +368,18 @@ async def start_web():
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
+    print(f"✅ Bot is ready!")
+    
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} commands.")
     except Exception as e:
         print(f"❌ Failed to sync commands: {e}")
     
-    # Start the web server in background
-    bot.loop.create_task(start_web())
+    # Start the web server in background (only once)
+    if not hasattr(bot, 'web_server_started'):
+        bot.web_server_started = True
+        bot.loop.create_task(start_web())
 
 # ---------- RUN ----------
 if __name__ == "__main__":
