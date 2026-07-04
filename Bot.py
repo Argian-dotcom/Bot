@@ -10,7 +10,8 @@ from aiohttp import web
 import asyncio
 
 # ---------- DATABASE ----------
-DB_PATH = os.path.join(os.getcwd(), "keys.db")  # Gamitin ang absolute path para sigurado
+# Use /tmp for Render (persistent across deployments)
+DB_PATH = os.getenv("DATABASE_PATH", "/tmp/keys.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -258,11 +259,14 @@ async def start_web():
     app.router.add_post('/validate', validate)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Gamitin ang PORT na ibinibigay ng Render (default 10000), fallback sa 5000
+    
+    # Use PORT from Render environment, fallback to 5000 for local testing
     port = int(os.getenv("PORT", 5000))
+    
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"✅ Validation server running on port {port}")
+    
     # Keep the server alive
     await asyncio.Event().wait()
 
@@ -275,6 +279,7 @@ async def on_ready():
         print(f"✅ Synced {len(synced)} commands.")
     except Exception as e:
         print(f"❌ Failed to sync commands: {e}")
+    
     # Start the web server in background
     bot.loop.create_task(start_web())
 
