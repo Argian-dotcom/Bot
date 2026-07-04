@@ -5,7 +5,7 @@ import sqlite3
 import os
 import random
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from aiohttp import web
 import asyncio
 
@@ -57,6 +57,10 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ---------- HELPER FUNCTIONS ----------
+def get_current_time():
+    """Get current UTC time with timezone"""
+    return datetime.now(timezone.utc)
+
 def generate_key_code(length=8):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
@@ -65,7 +69,9 @@ def add_key(key_code, script_url, max_uses, expiry_days):
     c = conn.cursor()
     expiry = None
     if expiry_days > 0:
-        expiry = (datetime.utcnow() + timedelta(days=expiry_days)).isoformat()
+        # Calculate expiry using UTC timezone
+        expiry_time = get_current_time() + timedelta(days=expiry_days)
+        expiry = expiry_time.isoformat()
     try:
         c.execute("INSERT INTO keys (key_code, script_url, max_uses, expiry) VALUES (?, ?, ?, ?)",
                   (key_code, script_url, max_uses, expiry))
@@ -88,8 +94,13 @@ def is_key_valid(key_code):
     if used_count >= max_uses:
         return False
     if expiry:
-        exp_dt = datetime.fromisoformat(expiry)
-        if datetime.utcnow() > exp_dt:
+        try:
+            exp_dt = datetime.fromisoformat(expiry)
+            current_time = get_current_time()
+            if current_time > exp_dt:
+                return False
+        except Exception as e:
+            print(f"❌ Error parsing expiry time: {e}")
             return False
     return True
 
@@ -102,23 +113,33 @@ def redeem_key(key_code, discord_id):
         conn.close()
         return None, None, "Invalid key code."
     key_id, script_url, max_uses, used_count, redeemed_by, expiry = row
+    
     if expiry:
-        exp_dt = datetime.fromisoformat(expiry)
-        if datetime.utcnow() > exp_dt:
+        try:
+            exp_dt = datetime.fromisoformat(expiry)
+            current_time = get_current_time()
+            if current_time > exp_dt:
+                conn.close()
+                return None, None, "This key has expired."
+        except Exception as e:
             conn.close()
-            return None, None, "This key has expired."
+            return None, None, f"Error checking expiry: {str(e)}"
+    
     if used_count >= max_uses:
         conn.close()
         return None, None, "This key has been fully redeemed."
+    
     new_used = used_count + 1
     if redeemed_by is None:
         redeemed_by = discord_id
+    
+    current_time = get_current_time().isoformat()
     c.execute("UPDATE keys SET used_count = ?, redeemed_by = ?, redeemed_at = ? WHERE id = ?",
-              (new_used, redeemed_by, datetime.utcnow().isoformat(), key_id))
+              (new_used, redeemed_by, current_time, key_id))
     c.execute("INSERT INTO users (discord_id, total_redeemed) VALUES (?, 1) "
               "ON CONFLICT(discord_id) DO UPDATE SET total_redeemed = total_redeemed + 1", (discord_id,))
     c.execute("INSERT INTO redemptions (discord_id, key_code, redeemed_at) VALUES (?, ?, ?)",
-              (discord_id, key_code, datetime.utcnow().isoformat()))
+              (discord_id, key_code, current_time))
     conn.commit()
     conn.close()
     return script_url, key_code, "Key redeemed successfully!"
@@ -313,11 +334,20 @@ async def genkey(
     
     if success:
         expiry_text = f"{expiry_days} days" if expiry_days > 0 else "No expiry"
+        
+        # Calculate and show exact expiry time
+        if expiry_days > 0:
+            expiry_time = get_current_time() + timedelta(days=expiry_days)
+            expiry_display = expiry_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+        else:
+            expiry_display = "Never"
+        
         embed = discord.Embed(title="✅ Key Generated", color=discord.Color.green())
         embed.add_field(name="🔑 Key Code", value=f"`{key_code}`", inline=False)
         embed.add_field(name="📁 GitHub URL", value=github_url, inline=False)
         embed.add_field(name="📈 Max Uses", value=str(max_uses), inline=True)
         embed.add_field(name="⏰ Expiry", value=expiry_text, inline=True)
+        embed.add_field(name="🕐 Expires At", value=expiry_display, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
         await interaction.response.send_message(f"❌ Key `{key_code}` already exists.", ephemeral=True)
@@ -369,6 +399,7 @@ async def start_web():
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     print(f"✅ Bot is ready!")
+    print(f"✅ Current UTC Time: {get_current_time().strftime('%Y-%m-%d %H:%M:%S UTC')}")
     
     try:
         synced = await bot.tree.sync()
