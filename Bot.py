@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 from aiohttp import web
 import asyncio
 
-DB_PATH = "keys.db"
+# ---------- DATABASE ----------
+DB_PATH = os.path.join(os.getcwd(), "keys.db")  # Gamitin ang absolute path para sigurado
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -32,7 +33,6 @@ def init_db():
             total_redeemed INTEGER DEFAULT 0
         )
     ''')
-    # Bagong table para sa redemption logs
     c.execute('''
         CREATE TABLE IF NOT EXISTS redemptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,14 +46,16 @@ def init_db():
 
 init_db()
 
+# ---------- BOT SETUP ----------
 TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
-    raise ValueError("No DISCORD_TOKEN set")
+    raise ValueError("DISCORD_TOKEN environment variable is not set. Please set it in Render Environment Variables.")
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ---------- HELPER FUNCTIONS ----------
 def generate_key_code(length=8):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
@@ -97,16 +99,16 @@ def redeem_key(key_code, discord_id):
     row = c.fetchone()
     if not row:
         conn.close()
-        return None, "Invalid key code."
+        return None, None, "Invalid key code."
     key_id, script_url, max_uses, used_count, redeemed_by, expiry = row
     if expiry:
         exp_dt = datetime.fromisoformat(expiry)
         if datetime.utcnow() > exp_dt:
             conn.close()
-            return None, "This key has expired."
+            return None, None, "This key has expired."
     if used_count >= max_uses:
         conn.close()
-        return None, "This key has been fully redeemed."
+        return None, None, "This key has been fully redeemed."
     new_used = used_count + 1
     if redeemed_by is None:
         redeemed_by = discord_id
@@ -114,12 +116,11 @@ def redeem_key(key_code, discord_id):
               (new_used, redeemed_by, datetime.utcnow().isoformat(), key_id))
     c.execute("INSERT INTO users (discord_id, total_redeemed) VALUES (?, 1) "
               "ON CONFLICT(discord_id) DO UPDATE SET total_redeemed = total_redeemed + 1", (discord_id,))
-    # Log redemption
     c.execute("INSERT INTO redemptions (discord_id, key_code, redeemed_at) VALUES (?, ?, ?)",
               (discord_id, key_code, datetime.utcnow().isoformat()))
     conn.commit()
     conn.close()
-    return script_url, key_code, "Key redeemed successfully!"  # ibalik ang key_code
+    return script_url, key_code, "Key redeemed successfully!"
 
 def get_user_redemptions(discord_id):
     conn = sqlite3.connect(DB_PATH)
@@ -143,13 +144,11 @@ class RedeemModal(discord.ui.Modal, title="Redeem Key"):
     async def on_submit(self, interaction: discord.Interaction):
         key_code = self.key_input.value.strip()
         user_id = str(interaction.user.id)
-        result = redeem_key(key_code, user_id)
-        if result[0] is None:
-            embed = discord.Embed(title="❌ Failed", description=result[1], color=discord.Color.red())
+        script_url, used_key, msg = redeem_key(key_code, user_id)
+        if script_url is None:
+            embed = discord.Embed(title="❌ Failed", description=msg, color=discord.Color.red())
             await interaction.response.send_message(embed=embed, ephemeral=True)
             return
-        script_url, used_key, msg = result
-        # I-generate ang loader na may kasamang key
         loader = f'getgenv().Key = "{used_key}"\nloadstring(game:HttpGet("{script_url}"))()'
         embed = discord.Embed(title="✅ Key Redeemed!", description=msg, color=discord.Color.green())
         embed.add_field(name="Your Loader", value=f"```lua\n{loader}\n```", inline=False)
@@ -174,7 +173,6 @@ class PanelView(discord.ui.View):
         else:
             desc = ""
             for key_code, redeemed_at in redemptions:
-                # Kunin ang script_url mula sa keys table gamit ang key_code
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
                 c.execute("SELECT script_url FROM keys WHERE key_code = ?", (key_code,))
@@ -260,20 +258,24 @@ async def start_web():
     app.router.add_post('/validate', validate)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', 5000)
+    # Gamitin ang PORT na ibinibigay ng Render (default 10000), fallback sa 5000
+    port = int(os.getenv("PORT", 5000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print("Validation server running on port 5000")
+    print(f"✅ Validation server running on port {port}")
+    # Keep the server alive
     await asyncio.Event().wait()
 
 # ---------- BOT EVENTS ----------
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
+    print(f"✅ Logged in as {bot.user}")
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} commands.")
+        print(f"✅ Synced {len(synced)} commands.")
     except Exception as e:
-        print(e)
+        print(f"❌ Failed to sync commands: {e}")
+    # Start the web server in background
     bot.loop.create_task(start_web())
 
 # ---------- RUN ----------
