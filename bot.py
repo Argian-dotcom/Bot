@@ -8,6 +8,7 @@ import string
 from datetime import datetime, timedelta, timezone
 from aiohttp import web
 import asyncio
+import json
 
 # ---------- DATABASE ----------
 # Use /tmp for Render (persistent across deployments)
@@ -41,6 +42,14 @@ def init_db():
             discord_id TEXT NOT NULL,
             key_code TEXT NOT NULL,
             redeemed_at TEXT NOT NULL
+        )
+    ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS github_urls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            github_url TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
@@ -183,6 +192,46 @@ def get_user_stats(discord_id):
     row = c.fetchone()
     conn.close()
     return row[0] if row else 0
+
+def get_all_keys():
+    """Get all keys with their details"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT key_code, script_url, max_uses, used_count, redeemed_by, is_lifetime, expiry FROM keys ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def add_github_url(name, github_url):
+    """Add a GitHub URL preset"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO github_urls (name, github_url) VALUES (?, ?)", (name, github_url))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    finally:
+        conn.close()
+
+def get_github_urls():
+    """Get all GitHub URL presets"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT name, github_url FROM github_urls ORDER BY id DESC")
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def get_github_url_by_name(name):
+    """Get GitHub URL by name"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT github_url FROM github_urls WHERE name = ?", (name,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 # ---------- MODAL ----------
 class RedeemModal(discord.ui.Modal, title="Redeem Key"):
@@ -329,27 +378,64 @@ async def panel(interaction: discord.Interaction, channel: discord.TextChannel =
     embed.add_field(name="📊 My Stats", value="Check your redemption statistics (only redemption count)", inline=False)
     
     view = PanelView()
-    await target.send(embed=embed, view=view)
+    message = await target.send(embed=embed, view=view)
     await interaction.response.send_message(f"✅ Panel sent to {target.mention}", ephemeral=True)
+
+@bot.tree.command(name="apply", description="Add a GitHub URL preset (admin only)")
+@app_commands.describe(
+    name="Name for this preset (e.g., MainScript, AntiBat)",
+    github_url="Raw GitHub URL (e.g., https://raw.githubusercontent.com/.../script.lua)"
+)
+async def apply(interaction: discord.Interaction, name: str, github_url: str):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    
+    success = add_github_url(name, github_url)
+    
+    if success:
+        embed = discord.Embed(
+            title="✅ GitHub URL Saved",
+            description=f"Preset '{name}' has been saved!",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="📁 Preset Name", value=f"`{name}`", inline=False)
+        embed.add_field(name="🔗 GitHub URL", value=github_url, inline=False)
+        embed.add_field(name="💡 Usage", value=f"Use `/genkey` with `github_preset: {name}`", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message(f"❌ Preset '{name}' already exists.", ephemeral=True)
 
 @bot.tree.command(name="genkey", description="Generate a new key (admin only)")
 @app_commands.describe(
-    github_url="Raw GitHub URL of the Lua script (e.g., https://raw.githubusercontent.com/.../script.lua)",
     key_code="Optional custom key; auto-generate if blank",
     max_uses="Max redemptions (default 1, ignored if lifetime=True)",
     is_lifetime="Make this a lifetime key (never expires, unlimited uses)? (default False)",
+    github_preset="Use a saved GitHub preset (e.g., MainScript, AntiBat)",
+    github_url="Raw GitHub URL (only if not using preset)",
     expiry_days="Days until expiry (0 = no expiry, default 0, ignored if lifetime=True)"
 )
 async def genkey(
     interaction: discord.Interaction,
-    github_url: str,
     key_code: str = None,
     max_uses: int = 1,
     is_lifetime: bool = False,
+    github_preset: str = None,
+    github_url: str = None,
     expiry_days: int = 0
 ):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    
+    # Determine GitHub URL
+    if github_preset:
+        github_url = get_github_url_by_name(github_preset)
+        if not github_url:
+            await interaction.response.send_message(f"❌ Preset '{github_preset}' not found.", ephemeral=True)
+            return
+    elif not github_url:
+        await interaction.response.send_message("❌ Please provide either a GitHub preset or direct URL.", ephemeral=True)
         return
     
     if not key_code:
@@ -376,13 +462,87 @@ async def genkey(
         
         embed = discord.Embed(title="✅ Key Generated", color=discord.Color.green())
         embed.add_field(name="🔑 Key Code", value=f"`{key_code}`", inline=False)
-        embed.add_field(name="📁 GitHub URL", value=github_url, inline=False)
         embed.add_field(name="📈 Max Uses", value=max_uses_display, inline=True)
         embed.add_field(name="⏰ Expiry Type", value=expiry_text, inline=True)
         embed.add_field(name="🕐 Expires At", value=expiry_display, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
         await interaction.response.send_message(f"❌ Key `{key_code}` already exists.", ephemeral=True)
+
+@bot.tree.command(name="viewall", description="View all keys and their details (admin only)")
+async def viewall(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("❌ No permission.", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    keys = get_all_keys()
+    
+    if not keys:
+        embed = discord.Embed(
+            title="📭 No Keys",
+            description="No keys have been generated yet.",
+            color=discord.Color.orange()
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+        return
+    
+    # Create embeds for each key (max 25 fields per embed)
+    embeds = []
+    current_embed = discord.Embed(title="🔑 All Keys", color=discord.Color.blue())
+    field_count = 0
+    
+    for key_code, script_url, max_uses, used_count, redeemed_by, is_lifetime, expiry in keys:
+        # Determine status
+        if used_count >= max_uses:
+            status = "❌ FULLY REDEEMED"
+        elif is_lifetime:
+            status = "✅ LIFETIME (Active)"
+        elif expiry:
+            try:
+                exp_dt = datetime.fromisoformat(expiry)
+                if get_current_time() > exp_dt:
+                    status = "⏰ EXPIRED"
+                else:
+                    status = "✅ ACTIVE"
+            except:
+                status = "❓ UNKNOWN"
+        else:
+            status = "✅ ACTIVE"
+        
+        # Redeemed by user
+        redeemed_text = f"<@{redeemed_by}>" if redeemed_by else "Nobody yet"
+        
+        # Format expiry
+        if is_lifetime:
+            expiry_text = "Never"
+        elif expiry:
+            try:
+                exp_dt = datetime.fromisoformat(expiry).strftime("%Y-%m-%d %H:%M")
+                expiry_text = exp_dt
+            except:
+                expiry_text = "N/A"
+        else:
+            expiry_text = "No expiry"
+        
+        field_value = f"**Status:** {status}\n**Uses:** {used_count}/{max_uses}\n**Redeemed By:** {redeemed_text}\n**Expires:** {expiry_text}"
+        
+        current_embed.add_field(name=f"🔑 {key_code}", value=field_value, inline=False)
+        field_count += 1
+        
+        # Start new embed if too many fields
+        if field_count >= 25:
+            embeds.append(current_embed)
+            current_embed = discord.Embed(title="🔑 All Keys (Continued)", color=discord.Color.blue())
+            field_count = 0
+    
+    if field_count > 0:
+        embeds.append(current_embed)
+    
+    # Send all embeds
+    for embed in embeds:
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ---------- VALIDATION WEB SERVER ----------
 async def validate(request):
@@ -414,13 +574,12 @@ async def health_check(request):
 async def start_web():
     app = web.Application()
     app.router.add_post('/validate', validate)
-    app.router.add_get('/', health_check)  # Health check endpoint for UptimeRobot
-    app.router.add_get('/health', health_check)  # Alternative health endpoint
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
     
     runner = web.AppRunner(app)
     await runner.setup()
     
-    # Use PORT from Render environment, fallback to 5000 for local testing
     port = int(os.getenv("PORT", 5000))
     
     site = web.TCPSite(runner, '0.0.0.0', port)
@@ -428,7 +587,6 @@ async def start_web():
     print(f"✅ Validation server running on port {port}")
     print(f"✅ Health check available at / and /health")
     
-    # Keep the server alive
     await asyncio.Event().wait()
 
 # ---------- BOT EVENTS ----------
@@ -445,7 +603,6 @@ async def on_ready():
     except Exception as e:
         print(f"❌ Failed to sync commands: {e}")
     
-    # Start the web server in background (only once)
     if not hasattr(bot, 'web_server_started'):
         bot.web_server_started = True
         bot.loop.create_task(start_web())
