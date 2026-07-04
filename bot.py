@@ -25,7 +25,8 @@ def init_db():
             used_count INTEGER DEFAULT 0,
             redeemed_by TEXT DEFAULT NULL,
             redeemed_at TEXT DEFAULT NULL,
-            expiry TEXT DEFAULT NULL
+            expiry TEXT DEFAULT NULL,
+            is_lifetime INTEGER DEFAULT 0
         )
     ''')
     c.execute('''
@@ -64,17 +65,19 @@ def get_current_time():
 def generate_key_code(length=8):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
-def add_key(key_code, script_url, max_uses, expiry_days):
+def add_key(key_code, script_url, max_uses, expiry_days, is_lifetime=False):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     expiry = None
-    if expiry_days > 0:
+    
+    if not is_lifetime and expiry_days > 0:
         # Calculate expiry using UTC timezone
         expiry_time = get_current_time() + timedelta(days=expiry_days)
         expiry = expiry_time.isoformat()
+    
     try:
-        c.execute("INSERT INTO keys (key_code, script_url, max_uses, expiry) VALUES (?, ?, ?, ?)",
-                  (key_code, script_url, max_uses, expiry))
+        c.execute("INSERT INTO keys (key_code, script_url, max_uses, expiry, is_lifetime) VALUES (?, ?, ?, ?, ?)",
+                  (key_code, script_url, max_uses, expiry, 1 if is_lifetime else 0))
         conn.commit()
         return True
     except sqlite3.IntegrityError:
@@ -85,14 +88,19 @@ def add_key(key_code, script_url, max_uses, expiry_days):
 def is_key_valid(key_code):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT max_uses, used_count, expiry FROM keys WHERE key_code = ?", (key_code,))
+    c.execute("SELECT max_uses, used_count, expiry, is_lifetime FROM keys WHERE key_code = ?", (key_code,))
     row = c.fetchone()
     conn.close()
     if not row:
         return False
-    max_uses, used_count, expiry = row
+    max_uses, used_count, expiry, is_lifetime = row
     if used_count >= max_uses:
         return False
+    
+    # If lifetime key, no expiry check needed
+    if is_lifetime:
+        return True
+    
     if expiry:
         try:
             exp_dt = datetime.fromisoformat(expiry)
@@ -107,14 +115,14 @@ def is_key_valid(key_code):
 def redeem_key(key_code, discord_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT id, script_url, max_uses, used_count, redeemed_by, expiry FROM keys WHERE key_code = ?", (key_code,))
+    c.execute("SELECT id, script_url, max_uses, used_count, redeemed_by, expiry, is_lifetime FROM keys WHERE key_code = ?", (key_code,))
     row = c.fetchone()
     if not row:
         conn.close()
         return None, None, "Invalid key code."
-    key_id, script_url, max_uses, used_count, redeemed_by, expiry = row
+    key_id, script_url, max_uses, used_count, redeemed_by, expiry, is_lifetime = row
     
-    if expiry:
+    if expiry and not is_lifetime:
         try:
             exp_dt = datetime.fromisoformat(expiry)
             current_time = get_current_time()
@@ -313,13 +321,15 @@ async def panel(interaction: discord.Interaction, channel: discord.TextChannel =
     github_url="Raw GitHub URL of the Lua script (e.g., https://raw.githubusercontent.com/.../script.lua)",
     key_code="Optional custom key; auto-generate if blank",
     max_uses="Max redemptions (default 1)",
-    expiry_days="Days until expiry (0 = no expiry, default 0)"
+    is_lifetime="Make this a lifetime key (never expires)? (default False)",
+    expiry_days="Days until expiry (0 = no expiry, default 0, ignored if lifetime=True)"
 )
 async def genkey(
     interaction: discord.Interaction,
     github_url: str,
     key_code: str = None,
     max_uses: int = 1,
+    is_lifetime: bool = False,
     expiry_days: int = 0
 ):
     if not interaction.user.guild_permissions.administrator:
@@ -330,23 +340,26 @@ async def genkey(
         key_code = generate_key_code()
     
     key_code = key_code.upper()
-    success = add_key(key_code, github_url, max_uses, expiry_days)
+    success = add_key(key_code, github_url, max_uses, expiry_days, is_lifetime)
     
     if success:
-        expiry_text = f"{expiry_days} days" if expiry_days > 0 else "No expiry"
-        
-        # Calculate and show exact expiry time
-        if expiry_days > 0:
+        # Determine expiry text
+        if is_lifetime:
+            expiry_text = "LIFETIME ♾️"
+            expiry_display = "Never Expires"
+        elif expiry_days > 0:
+            expiry_text = f"{expiry_days} days"
             expiry_time = get_current_time() + timedelta(days=expiry_days)
             expiry_display = expiry_time.strftime("%Y-%m-%d %H:%M:%S UTC")
         else:
+            expiry_text = "No expiry"
             expiry_display = "Never"
         
         embed = discord.Embed(title="✅ Key Generated", color=discord.Color.green())
         embed.add_field(name="🔑 Key Code", value=f"`{key_code}`", inline=False)
         embed.add_field(name="📁 GitHub URL", value=github_url, inline=False)
         embed.add_field(name="📈 Max Uses", value=str(max_uses), inline=True)
-        embed.add_field(name="⏰ Expiry", value=expiry_text, inline=True)
+        embed.add_field(name="⏰ Expiry Type", value=expiry_text, inline=True)
         embed.add_field(name="🕐 Expires At", value=expiry_display, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
