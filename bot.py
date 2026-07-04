@@ -70,6 +70,10 @@ def add_key(key_code, script_url, max_uses, expiry_days, is_lifetime=False):
     c = conn.cursor()
     expiry = None
     
+    # For lifetime keys, set max_uses to 99999 (essentially unlimited)
+    if is_lifetime:
+        max_uses = 99999
+    
     if not is_lifetime and expiry_days > 0:
         # Calculate expiry using UTC timezone
         expiry_time = get_current_time() + timedelta(days=expiry_days)
@@ -79,6 +83,7 @@ def add_key(key_code, script_url, max_uses, expiry_days, is_lifetime=False):
         c.execute("INSERT INTO keys (key_code, script_url, max_uses, expiry, is_lifetime) VALUES (?, ?, ?, ?, ?)",
                   (key_code, script_url, max_uses, expiry, 1 if is_lifetime else 0))
         conn.commit()
+        print(f"✅ Key created: {key_code} | Lifetime: {is_lifetime} | Max Uses: {max_uses}")
         return True
     except sqlite3.IntegrityError:
         return False
@@ -92,24 +97,35 @@ def is_key_valid(key_code):
     row = c.fetchone()
     conn.close()
     if not row:
+        print(f"❌ Key not found: {key_code}")
         return False
     max_uses, used_count, expiry, is_lifetime = row
+    
+    print(f"🔍 Key Check: {key_code} | Used: {used_count}/{max_uses} | Lifetime: {is_lifetime} | Expiry: {expiry}")
+    
+    # Check if already fully redeemed
     if used_count >= max_uses:
+        print(f"❌ Key fully redeemed: {key_code}")
         return False
     
     # If lifetime key, no expiry check needed
     if is_lifetime:
+        print(f"✅ Lifetime key valid: {key_code}")
         return True
     
     if expiry:
         try:
             exp_dt = datetime.fromisoformat(expiry)
             current_time = get_current_time()
+            print(f"⏰ Expiry check: Current={current_time} | Expiry={exp_dt}")
             if current_time > exp_dt:
+                print(f"❌ Key expired: {key_code}")
                 return False
         except Exception as e:
             print(f"❌ Error parsing expiry time: {e}")
             return False
+    
+    print(f"✅ Key is valid: {key_code}")
     return True
 
 def redeem_key(key_code, discord_id):
@@ -320,8 +336,8 @@ async def panel(interaction: discord.Interaction, channel: discord.TextChannel =
 @app_commands.describe(
     github_url="Raw GitHub URL of the Lua script (e.g., https://raw.githubusercontent.com/.../script.lua)",
     key_code="Optional custom key; auto-generate if blank",
-    max_uses="Max redemptions (default 1)",
-    is_lifetime="Make this a lifetime key (never expires)? (default False)",
+    max_uses="Max redemptions (default 1, ignored if lifetime=True)",
+    is_lifetime="Make this a lifetime key (never expires, unlimited uses)? (default False)",
     expiry_days="Days until expiry (0 = no expiry, default 0, ignored if lifetime=True)"
 )
 async def genkey(
@@ -347,18 +363,21 @@ async def genkey(
         if is_lifetime:
             expiry_text = "LIFETIME ♾️"
             expiry_display = "Never Expires"
+            max_uses_display = "Unlimited ♾️"
         elif expiry_days > 0:
             expiry_text = f"{expiry_days} days"
             expiry_time = get_current_time() + timedelta(days=expiry_days)
             expiry_display = expiry_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+            max_uses_display = str(max_uses)
         else:
             expiry_text = "No expiry"
             expiry_display = "Never"
+            max_uses_display = str(max_uses)
         
         embed = discord.Embed(title="✅ Key Generated", color=discord.Color.green())
         embed.add_field(name="🔑 Key Code", value=f"`{key_code}`", inline=False)
         embed.add_field(name="📁 GitHub URL", value=github_url, inline=False)
-        embed.add_field(name="📈 Max Uses", value=str(max_uses), inline=True)
+        embed.add_field(name="📈 Max Uses", value=max_uses_display, inline=True)
         embed.add_field(name="⏰ Expiry Type", value=expiry_text, inline=True)
         embed.add_field(name="🕐 Expires At", value=expiry_display, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -370,18 +389,23 @@ async def validate(request):
     try:
         data = await request.json()
         key = data.get('key')
-    except:
-        return web.json_response({"valid": False, "message": "Invalid JSON"}, status=400)
+    except Exception as e:
+        print(f"❌ JSON parse error: {e}")
+        return web.json_response({"valid": False, "message": "Invalid JSON"}, status=200)
     
     if not key:
-        return web.json_response({"valid": False, "message": "No key provided"}, status=400)
+        print("❌ No key provided in request")
+        return web.json_response({"valid": False, "message": "No key provided"}, status=200)
     
+    print(f"🔍 Validating key: {key}")
     valid = is_key_valid(key)
     
     if valid:
+        print(f"✅ Key validation passed: {key}")
         return web.json_response({"valid": True, "message": "Key is valid"}, status=200)
     else:
-        return web.json_response({"valid": False, "message": "Key is invalid or expired"}, status=403)
+        print(f"❌ Key validation failed: {key}")
+        return web.json_response({"valid": False, "message": "Key is invalid or expired"}, status=200)
 
 async def health_check(request):
     """Health check endpoint for UptimeRobot - returns 200 OK"""
@@ -413,6 +437,7 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     print(f"✅ Bot is ready!")
     print(f"✅ Current UTC Time: {get_current_time().strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    print(f"✅ Database path: {DB_PATH}")
     
     try:
         synced = await bot.tree.sync()
