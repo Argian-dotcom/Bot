@@ -13,6 +13,7 @@ import aiohttp
 
 # ---------- DATABASE ----------
 DB_PATH = os.getenv("DATABASE_PATH", "/tmp/keys.db")
+BASE_URL = os.getenv("BASE_URL", "https://your-bot-url.com")  # <-- PALITAN
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -78,7 +79,10 @@ def init_db():
         ('button_loaders', '📜 View Loaders'),
         ('button_stats', '📊 My Stats'),
         ('button_role', '🎖️ Get Role'),
-        ('buyer_role_id', None)
+        ('buyer_role_id', None),
+        ('base_url', BASE_URL),
+        ('script_endpoint_path', '/loadstring/'),   # <-- BAGONG SETTING
+        ('script_watermark', 'Loaded from Ashtron-website')  # <-- BAGONG SETTING
     ]
     for k, v in defaults:
         c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
@@ -306,6 +310,14 @@ def get_github_url_by_name(name):
     conn.close()
     return row[0] if row else None
 
+def get_key_info(key_code):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT script_url, max_uses, used_count, expiry, is_lifetime FROM keys WHERE key_code = ?", (key_code,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
 # ---------- MODAL ----------
 class RedeemModal(discord.ui.Modal, title="Redeem Key"):
     key_input = discord.ui.TextInput(label="Enter your key code", placeholder="e.g. ABC123XY", required=True, max_length=20)
@@ -318,7 +330,11 @@ class RedeemModal(discord.ui.Modal, title="Redeem Key"):
             embed = discord.Embed(title="❌ Redemption Failed", description=msg, color=discord.Color.red())
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
-        loader = f'getgenv().Key = "{used_key}"\nloadstring(game:HttpGet("{script_url}"))()'
+        base_url = get_setting('base_url') or BASE_URL
+        endpoint_path = get_setting('script_endpoint_path') or '/loadstring/'
+        if not endpoint_path.startswith('/'): endpoint_path = '/' + endpoint_path
+        if not endpoint_path.endswith('/'): endpoint_path = endpoint_path + '/'
+        loader = f'getgenv().Key = "{used_key}"\nloadstring(game:HttpGet("{base_url}{endpoint_path}{used_key}"))()'
         embed = discord.Embed(title="✅ Key Redeemed Successfully!", description=msg, color=discord.Color.green())
         embed.add_field(name="🔑 Your Loader", value=f"```lua\n{loader}\n```", inline=False)
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -361,21 +377,22 @@ class PanelView(discord.ui.View):
             embed = discord.Embed(title="📭 No Loaders Yet", description="You haven't redeemed any keys yet.", color=discord.Color.orange())
             await interaction.followup.send(embed=embed, ephemeral=True)
             return
+        base_url = get_setting('base_url') or BASE_URL
+        endpoint_path = get_setting('script_endpoint_path') or '/loadstring/'
+        if not endpoint_path.startswith('/'): endpoint_path = '/' + endpoint_path
+        if not endpoint_path.endswith('/'): endpoint_path = endpoint_path + '/'
         desc = ""
         for key_code, redeemed_at in redemptions:
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("SELECT script_url FROM keys WHERE key_code = ?", (key_code,))
-            row = c.fetchone()
-            conn.close()
-            if row:
-                script_url = row[0]
-                loader = f'getgenv().Key = "{key_code}"\nloadstring(game:HttpGet("{script_url}"))()'
+            info = get_key_info(key_code)
+            if info:
+                loader = f'getgenv().Key = "{key_code}"\nloadstring(game:HttpGet("{base_url}{endpoint_path}{key_code}"))()'
                 try:
                     redeemed_date = datetime.fromisoformat(redeemed_at).strftime("%Y-%m-%d %H:%M:%S")
                 except:
                     redeemed_date = redeemed_at
                 desc += f"**Redeemed:** {redeemed_date}\n```lua\n{loader}\n```\n\n"
+        if not desc:
+            desc = "No valid loaders found."
         embed = discord.Embed(title="📜 Your Loaders", description=desc, color=discord.Color.blue())
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -428,7 +445,7 @@ async def panel(interaction: discord.Interaction, channel: discord.TextChannel =
     await target.send(embed=embed, view=view)
     await interaction.response.send_message(f"✅ Panel sent to {target.mention}", ephemeral=True)
 
-@bot.tree.command(name="customize", description="Customize the panel appearance (admin only)")
+@bot.tree.command(name="customize", description="Customize the panel and script appearance (admin only)")
 @app_commands.describe(
     setting="Which setting to change",
     value="New value for the setting"
@@ -438,7 +455,9 @@ async def panel(interaction: discord.Interaction, channel: discord.TextChannel =
     app_commands.Choice(name="Redeem Button Label", value="button_redeem"),
     app_commands.Choice(name="View Loaders Button Label", value="button_loaders"),
     app_commands.Choice(name="My Stats Button Label", value="button_stats"),
-    app_commands.Choice(name="Get Role Button Label", value="button_role")
+    app_commands.Choice(name="Get Role Button Label", value="button_role"),
+    app_commands.Choice(name="Script Endpoint Path", value="script_endpoint_path"),
+    app_commands.Choice(name="Script Watermark", value="script_watermark")
 ])
 async def customize(interaction: discord.Interaction, setting: app_commands.Choice[str], value: str):
     if not interaction.user.guild_permissions.administrator:
@@ -611,7 +630,6 @@ async def viewall(interaction: discord.Interaction):
     for embed in embeds:
         await interaction.followup.send(embed=embed, ephemeral=True)
 
-# ---------- NEW COMMAND: KEYDROPS (countdown only, generates ONE key) ----------
 @bot.tree.command(name="keydrops", description="Start a key drop countdown and generate one key (admin only)")
 @app_commands.describe(
     count="Countdown seconds (max 30)",
@@ -647,16 +665,13 @@ async def keydrops(
         await interaction.response.send_message("❌ Please provide either a GitHub preset or direct URL.", ephemeral=True)
         return
 
-    # Initial message
     await interaction.response.send_message(f"🔔 Key drop starting in {count} seconds...")
     msg = await interaction.original_response()
 
-    # Countdown loop
     for i in range(count, 0, -1):
         await msg.edit(content=f"🔔 Key drop in {i} seconds...")
         await asyncio.sleep(1)
 
-    # Generate ONE key
     key_code = generate_key_code()
     success = add_key(key_code, github_url, max_uses, expiry_days, is_lifetime, str(interaction.user.id))
     if success:
@@ -665,7 +680,7 @@ async def keydrops(
         content = "❌ Failed to generate key. Key might already exist."
     await msg.edit(content=content)
 
-# ---------- WEB SERVER (VALIDATION ENDPOINT) ----------
+# ---------- WEB SERVER ----------
 async def validate(request):
     try:
         data = await request.json()
@@ -705,12 +720,215 @@ async def validate(request):
                 "already_used": True
             }, status=200)
 
+async def serve_script(request):
+    # Extract key_code from URL path
+    path = request.path
+    parts = path.split('/')
+    if len(parts) < 2:
+        return web.Response(text="Invalid request", status=400)
+    key_code = parts[-1].upper()
+
+    # Get key info
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT script_url, max_uses, used_count, expiry, is_lifetime FROM keys WHERE key_code = ?", (key_code,))
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return web.Response(text="-- Key not found", status=404)
+
+    script_url, max_uses, used_count, expiry, is_lifetime = row
+    if used_count >= max_uses:
+        return web.Response(text="-- Key fully redeemed", status=403)
+    if not is_lifetime and expiry:
+        try:
+            exp_dt = datetime.fromisoformat(expiry)
+            if get_current_time() > exp_dt:
+                return web.Response(text="-- Key expired", status=403)
+        except:
+            pass
+
+    # Fetch original GitHub script
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(script_url) as resp:
+                if resp.status != 200:
+                    return web.Response(text="-- Failed to fetch script", status=500)
+                original_script = await resp.text()
+    except Exception:
+        return web.Response(text="-- Error fetching script", status=500)
+
+    # Build validation wrapper
+    scheme = request.scheme
+    host = request.host
+    validate_url = f"{scheme}://{host}/validate"
+
+    watermark = get_setting('script_watermark') or 'Loaded from Ashtron-website'
+    header = f"""
+-- ========================================
+-- 🔐 {watermark}
+-- ========================================
+"""
+
+    validation_lua = f"""
+-- 🔐 KEY VALIDATION (embedded by bot)
+
+local key = getgenv().Key
+if not key or key == "" then
+    error("No key provided. Set getgenv().Key before loading.")
+end
+
+local function showErrorScreen(errorMessage, leaveButtonText)
+    local Players = game:GetService("Players")
+    local CoreGui = game:GetService("CoreGui")
+    local LocalPlayer = Players.LocalPlayer
+
+    local ErrorGui = Instance.new("ScreenGui")
+    ErrorGui.Name = "ErrorScreen"
+    ErrorGui.ResetOnSpawn = false
+    ErrorGui.Parent = CoreGui
+
+    local BackgroundFrame = Instance.new("Frame")
+    BackgroundFrame.Size = UDim2.new(1, 0, 1, 0)
+    BackgroundFrame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    BackgroundFrame.BackgroundTransparency = 0.5
+    BackgroundFrame.Parent = ErrorGui
+
+    local ErrorContainer = Instance.new("Frame")
+    ErrorContainer.Size = UDim2.new(0, 400, 0, 250)
+    ErrorContainer.Position = UDim2.new(0.5, -200, 0.5, -125)
+    ErrorContainer.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    ErrorContainer.BorderSizePixel = 0
+    ErrorContainer.Parent = ErrorGui
+
+    local Corner = Instance.new("UICorner")
+    Corner.CornerRadius = UDim.new(0, 15)
+    Corner.Parent = ErrorContainer
+
+    local Stroke = Instance.new("UIStroke")
+    Stroke.Color = Color3.fromRGB(255, 50, 50)
+    Stroke.Thickness = 2
+    Stroke.Parent = ErrorContainer
+
+    local TitleLabel = Instance.new("TextLabel")
+    TitleLabel.Size = UDim2.new(1, 0, 0, 60)
+    TitleLabel.BackgroundColor3 = Color3.fromRGB(40, 20, 20)
+    TitleLabel.BorderSizePixel = 0
+    TitleLabel.Font = Enum.Font.GothamBold
+    TitleLabel.Text = "❌ ACCESS DENIED"
+    TitleLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+    TitleLabel.TextSize = 18
+    TitleLabel.Parent = ErrorContainer
+
+    local TitleCorner = Instance.new("UICorner")
+    TitleCorner.CornerRadius = UDim.new(0, 15)
+    TitleCorner.Parent = TitleLabel
+
+    local MessageLabel = Instance.new("TextLabel")
+    MessageLabel.Size = UDim2.new(1, -20, 0, 80)
+    MessageLabel.Position = UDim2.new(0, 10, 0, 70)
+    MessageLabel.BackgroundTransparency = 1
+    MessageLabel.Font = Enum.Font.Gotham
+    MessageLabel.Text = errorMessage or "Invalid Key"
+    MessageLabel.TextColor3 = Color3.fromRGB(255, 150, 150)
+    MessageLabel.TextSize = 14
+    MessageLabel.TextWrapped = true
+    MessageLabel.TextXAlignment = Enum.TextXAlignment.Center
+    MessageLabel.TextYAlignment = Enum.TextYAlignment.Top
+    MessageLabel.Parent = ErrorContainer
+
+    local LeaveButton = Instance.new("TextButton")
+    LeaveButton.Size = UDim2.new(0, 150, 0, 40)
+    LeaveButton.Position = UDim2.new(0.5, -75, 1, -50)
+    LeaveButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    LeaveButton.BorderSizePixel = 0
+    LeaveButton.Font = Enum.Font.GothamBold
+    LeaveButton.Text = leaveButtonText or "Leave Game"
+    LeaveButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    LeaveButton.TextSize = 14
+    LeaveButton.Parent = ErrorContainer
+
+    local ButtonCorner = Instance.new("UICorner")
+    ButtonCorner.CornerRadius = UDim.new(0, 8)
+    ButtonCorner.Parent = LeaveButton
+
+    LeaveButton.MouseEnter:Connect(function()
+        LeaveButton.BackgroundColor3 = Color3.fromRGB(220, 80, 80)
+    end)
+    LeaveButton.MouseLeave:Connect(function()
+        LeaveButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    end)
+
+    LeaveButton.MouseButton1Click:Connect(function()
+        Players:LeaveGame()
+    end)
+end
+
+local function validateKey(k)
+    local Players = game:GetService("Players")
+    local HttpService = game:GetService("HttpService")
+    local localPlayer = Players.LocalPlayer
+
+    if not localPlayer then
+        showErrorScreen("Error: Cannot identify Roblox user.", "Leave Game")
+        return false
+    end
+
+    local robloxUserId = localPlayer.UserId
+    local requestBody = HttpService:JSONEncode({{
+        key = k,
+        robloxUserId = tostring(robloxUserId)
+    }})
+
+    local success, response = pcall(function()
+        return game:HttpPost(
+            "{validate_url}",
+            requestBody,
+            Enum.HttpContentType.ApplicationJson,
+            true
+        )
+    end)
+
+    if not success then
+        showErrorScreen("Validation Server Error\\n\\n" .. tostring(response), "Leave Game")
+        return false
+    end
+
+    local parsed
+    pcall(function()
+        parsed = HttpService:JSONDecode(response)
+    end)
+
+    if parsed and parsed.valid == true then
+        return true
+    else
+        local msg = parsed and parsed.message or "Unknown error"
+        if parsed and parsed.already_used then
+            showErrorScreen("ALREADY USE KEY\\n\\nThis key has already been used by another Roblox account.\\n\\n" .. msg, "Leave Game")
+        else
+            showErrorScreen("Invalid or Expired Key\\n\\n" .. msg, "Leave Game")
+        end
+        return false
+    end
+end
+
+if not validateKey(key) then
+    error("Key validation failed. Script will not execute.")
+end
+"""
+    full_script = header + validation_lua + "\n" + original_script
+    return web.Response(text=full_script, content_type='text/plain')
+
 async def health_check(request):
     return web.json_response({"status": "ok", "bot": "online"}, status=200)
 
 async def start_web():
     app = web.Application()
     app.router.add_post('/validate', validate)
+    # Get the configured endpoint path
+    endpoint_path = get_setting('script_endpoint_path') or '/loadstring/'
+    clean_path = endpoint_path.strip('/')
+    app.router.add_get(f'/{clean_path}/{{key_code}}', serve_script)
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
     runner = web.AppRunner(app)
@@ -718,7 +936,9 @@ async def start_web():
     port = int(os.getenv("PORT", 5000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"✅ Validation server running on port {port}")
+    print(f"✅ Web server running on port {port}")
+    print(f"✅ Validation endpoint: /validate")
+    print(f"✅ Script endpoint: {endpoint_path}<key_code>")
     await asyncio.Event().wait()
 
 # ---------- BOT EVENTS ----------
