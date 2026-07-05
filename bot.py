@@ -13,7 +13,7 @@ import aiohttp
 
 # ---------- DATABASE ----------
 DB_PATH = os.getenv("DATABASE_PATH", "/tmp/keys.db")
-BASE_URL = os.getenv("BASE_URL", "https://your-bot-url.com")  # <-- PALITAN
+BASE_URL = os.getenv("BASE_URL", "https://bot-5iih.onrender.com")  # <-- PALITAN
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
